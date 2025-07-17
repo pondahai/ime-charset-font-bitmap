@@ -1,0 +1,1 @@
+# ime-charset-font-bitmap
