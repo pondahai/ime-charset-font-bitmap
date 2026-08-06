@@ -1,4 +1,5 @@
 # PicoType 資料轉換工具鏈說明 (README)
+<img width="321" height="272" alt="螢幕擷取畫面 2026-08-06 132950" src="https://github.com/user-attachments/assets/26bb580f-2ff0-4e71-a4d8-6cdb053872a3" />
 
 ## 1. 總覽 (Overview)
 
