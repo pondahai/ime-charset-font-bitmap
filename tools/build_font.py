@@ -53,9 +53,25 @@ FONT_CHAIN = [
      dict(dx=+1, dy=-2, advance=13)),
 ]
 
-# 收錄範圍 = 主字型 cmap ∪ 這些字表。
-# 後者是「想要但主字型沒有」的字，由 charsets/missing_from_cubic.txt 提供。
-TARGET_CHARSETS = ["charsets/missing_from_cubic.txt"]
+# 收錄範圍 = ( 主字型 cmap ∪ 字表 ∪ 輸入法候選字 ) ∩ ( 鏈上任一層有字形 )
+#
+# 三個來源缺一不可，因為它們互不涵蓋（實測：字表 10,914 字、注音碼表 13,201 字，
+# 交集只有 7,357）：
+#   - 主字型 cmap  現有外觀的基準
+#   - 字表         「想顯示什麼」—— 含 ASCII、標點、簡體字，這些注音打不出來，
+#                   但裝置會收到別人傳來的訊息，仍然必須顯示得出來
+#   - 輸入法碼表   「能打出什麼」—— 碼表收字比字表全得多
+TARGET_CHARSETS = [
+    "charsets/chars_from_tcfreq_sc.txt",
+    "charsets/missing_from_cubic.txt",
+]
+
+# 輸入法候選字的來源。韌體與模擬器各有一份 IME 資料，兩者的候選字集合
+# 不見得一致，故取聯集 —— 避免模擬器正常但上機缺字（或反過來）。
+TARGET_IME_SIM = "output_data/zhuyin.dat"    # 模擬器用；header 的那份見 --ime-from
+
+# 仍然缺字的清單會寫到這裡，供追蹤。
+OUT_UNAVAILABLE = "charsets/unavailable.txt"
 
 OUT_HEADER = "output_data/picotype_data_optimized.h"
 OUT_FONT = "output_data/picotype_12.font"
@@ -146,9 +162,17 @@ class Layer:
                 left + self.dx, top + self.dy)
 
 
-def load_targets(layers):
-    """收錄範圍 = 主字型 cmap ∪ TARGET_CHARSETS。"""
+def chars_in(blob: bytes) -> set:
+    """從 IME 資料池取出所有字元。池內含注音鍵與候選字，兩者都該有字形。"""
+    return {ord(c) for c in blob.decode("utf-8", "ignore")
+            if not c.isspace()}
+
+
+def load_targets(layers, ime_pool: bytes):
+    """收錄範圍 = 主字型 cmap ∪ 字表 ∪ 輸入法候選字。"""
     targets = set(layers[0].cmap)
+    parts = [("主字型 cmap", len(targets))]
+
     for rel in TARGET_CHARSETS:
         p = os.path.join(REPO_ROOT, rel)
         if not os.path.exists(p):
@@ -156,15 +180,29 @@ def load_targets(layers):
             continue
         txt = open(p, encoding="utf-8").read()
         body = "".join(l for l in txt.splitlines() if not l.startswith("#"))
-        targets |= {ord(c) for c in body if not c.isspace()}
+        s = {ord(c) for c in body if not c.isspace()}
+        parts.append((os.path.basename(rel), len(s)))
+        targets |= s
+
+    ime = chars_in(ime_pool)
+    sim = os.path.join(REPO_ROOT, TARGET_IME_SIM)
+    if os.path.exists(sim):
+        ime |= chars_in(open(sim, "rb").read())
+    parts.append(("輸入法候選字", len(ime)))
+    targets |= ime
+
+    print("收錄範圍來源:")
+    for name, n in parts:
+        print(f"  {name:<32} {n:>7,}")
+    print(f"  {'聯集':<32} {len(targets):>7,}")
     return targets
 
 
 # ==============================================================================
 # --- 建置 ---
 # ==============================================================================
-def build(layers):
-    targets = load_targets(layers)
+def build(layers, ime_pool):
+    targets = load_targets(layers, ime_pool)
     records, bitmap, sources = [], bytearray(), {}
     n_excluded = n_missing = 0
     missing_cps = []
@@ -373,7 +411,15 @@ def main():
               f"  cmap {len(l.cmap):,}"
               f"{'  (' + ', '.join(corr) + ')' if corr else ''}")
 
-    records, bitmap, sources, stats = build(layers)
+    ime_path = os.path.join(REPO_ROOT, args.ime_from)
+    if not os.path.exists(ime_path):
+        raise SystemExit(f"錯誤: 找不到 IME 來源 header {ime_path}")
+    ime_src = open(ime_path, encoding="utf-8").read()
+    ime_idx = extract_array(ime_src, "zhuyin_idx_raw_opt")
+    ime_pool = extract_array(ime_src, "zhuyin_pool_opt")
+
+    print()
+    records, bitmap, sources, stats = build(layers, ime_pool)
     font_map = pack_map(records)
 
     print(f"\n收錄範圍 {stats['targets']:,} 字"
@@ -388,13 +434,19 @@ def main():
           f"   合計 {(len(bitmap)+len(font_map))/1024:.1f} KB")
     print(f"最大字形 {stats['max_glyph_bytes']} B")
 
-    ime_path = os.path.join(REPO_ROOT, args.ime_from)
-    if not os.path.exists(ime_path):
-        raise SystemExit(f"錯誤: 找不到 IME 來源 header {ime_path}")
-    ime_src = open(ime_path, encoding="utf-8").read()
-    ime_idx = extract_array(ime_src, "zhuyin_idx_raw_opt")
-    ime_pool = extract_array(ime_src, "zhuyin_pool_opt")
     print(f"IME 沿用: idx {len(ime_idx):,} B  pool {len(ime_pool):,} B")
+
+    # 仍然缺字的清單，供追蹤（已知問題）
+    unavail = os.path.join(REPO_ROOT, OUT_UNAVAILABLE)
+    cps = stats["missing_cps"]
+    with open(unavail, "w", encoding="utf-8", newline="\n") as f:
+        f.write(f"# 收錄範圍內、但 fallback 鏈上沒有任何一層有字形的 {len(cps)} 個字。\n"
+                f"# 這些字在裝置上會顯示洋紅方框。已知問題，非缺陷 ——\n"
+                f"# 補齊它們需要 16px 字型，會破壞 12px 的版面一致性。\n"
+                f"# 由 tools/build_font.py 自動產生。\n")
+        s = sorted(cps)
+        for i in range(0, len(s), 64):
+            f.write("".join(chr(c) for c in s[i:i + 64]) + "\n")
 
     write_header(os.path.join(REPO_ROOT, OUT_HEADER), font_map, bitmap,
                  len(records), ime_idx, ime_pool, layers,
