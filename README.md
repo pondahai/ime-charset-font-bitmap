@@ -31,13 +31,32 @@
 
 ### 2.1. 目前的流程
 
-```
-fonts/Cubic_11.ttf          [0] 主字型 ──┐
-fonts/fusion-pixel-...ttf   [1] fallback ─┤
-                                          ├─→ tools/build_font.py ──┬─→ picotype_data_optimized.h  (韌體)
-charsets/*.txt          ─┐                │                        ├─→ picotype_12.font + .map     (模擬器)
-輸入法候選字            ─┤ 收錄範圍 ──────┘                        ├─→ picotype_12.sources.json    (來源追溯)
-既有 .h 的 IME 陣列 (--ime-from) ─────────┘                        └─→ charsets/unavailable.txt    (已知缺字)
+```mermaid
+flowchart LR
+    C["fonts/Cubic_11.ttf<br/>[0] 主字型 @12px"]
+    F["fonts/fusion-pixel-12px<br/>[1] fallback @12px"]
+    CS["charsets/*.txt<br/>「想顯示什麼」"]
+    IM["輸入法碼表<br/>「能打出什麼」"]
+    CM["主字型 cmap<br/>現有外觀基準"]
+    S{"收錄範圍<br/>三方聯集"}
+    B["tools/build_font.py<br/>逐字沿鏈以 cmap 查找"]
+    H["picotype_data_optimized.h<br/>韌體"]
+    M["picotype_12.font + .map<br/>模擬器"]
+    SR["picotype_12.sources.json<br/>來源追溯"]
+    U["charsets/unavailable.txt<br/>已知缺字"]
+    IME["既有 .h 的 IME 陣列<br/>--ime-from"]
+
+    CM --> S
+    CS --> S
+    IM --> S
+    S --> B
+    C --> B
+    F --> B
+    IME --> B
+    B --> H
+    B --> M
+    B --> SR
+    B --> U
 ```
 
 **收錄範圍 = ( 主字型 cmap ∪ 字表 ∪ 輸入法候選字 ) ∩ ( 鏈上任一層有字形 )。**
