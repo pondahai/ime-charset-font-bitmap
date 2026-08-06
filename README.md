@@ -12,15 +12,16 @@
 
 > ### ⚠ 目前的主要流程已更換
 >
-> 字型資料已改為 **1 bit/pixel**，且**不再人工挑選常用字**，改為直接轉換整份字型的
-> cmap。現在的建置指令只有一行：
+> 字型資料已改為 **1 bit/pixel**，**不再人工挑選常用字**（改由字型 cmap 決定），
+> 並加入**多字型 fallback 鏈**。現在的建置指令只有一行：
 >
 > ```bash
 > python -X utf8 tools/build_font.py
 > ```
 >
-> 字型部分的 flash 佔用從 **1,420.3 KB 降到 353.8 KB**，且移除了 3,119 個假字形、
-> 新增 2,433 個真字形。詳細的來龍去脈見 **§7 改造紀錄**，新工具見 §4.3–4.6。
+> 字型部分的 flash 佔用從 **1,420.3 KB 降到 444.6 KB**，同時：
+> 移除 3,119 個 `.notdef` 假字形、收錄字數從 10,915 增為 **12,820（全部是真字形）**。
+> 詳細的來龍去脈見 **§7 改造紀錄**，新工具見 §4.3–4.6。
 >
 > 本文件 §1–§6 保留了改造前的原始說明。`charset_extractor.py` 與
 > `full_hardcode_converter.py` 仍在 repo 內，但**已非主要流程** —— 保留它們是為了
@@ -31,14 +32,18 @@
 ### 2.1. 目前的流程
 
 ```
-fonts/Cubic_11.ttf ──┐
-                     ├─→ tools/build_font.py ──┬─→ output_data/picotype_data_optimized.h  (韌體)
-既有 .h 的 IME 陣列 ──┘                        └─→ output_data/picotype_12.font + .map     (模擬器)
-   (--ime-from)
+fonts/Cubic_11.ttf          [0] 主字型 ──┐
+fonts/fusion-pixel-...ttf   [1] fallback ─┤
+                                          ├─→ tools/build_font.py ──┬─→ picotype_data_optimized.h  (韌體)
+charsets/missing_from_cubic.txt  收錄範圍 ─┤                        ├─→ picotype_12.font + .map     (模擬器)
+既有 .h 的 IME 陣列 (--ime-from) ─────────┘                        └─→ picotype_12.sources.json    (來源追溯)
 ```
 
-**只需要一套 TTF。** 收錄哪些字由字型的 cmap 決定，不再需要人工整理字元集
-（`charsets/`）—— 理由見 §7.2。IME 資料原樣沿用，不重建。
+**收錄範圍 = 主字型 cmap ∪ `charsets/missing_from_cubic.txt`。** 每個字依序在鏈上
+查找，**一律以 cmap 查表決定由哪一層提供**，不需要人工整理字元集 —— 理由見 §7.2。
+IME 資料原樣沿用，不重建。
+
+只想用主字型（第一階段的行為）可加 `--primary-only`。
 
 驗證與檢視：`verify_1bpp.py`（§4.4）確認產出正確，`font_viewer.py`（§4.6）目視檢閱。
 
@@ -84,10 +89,12 @@ PicoType_Project/
 │   ├── charset_extractor.py      # 舊流程
 │   └── full_hardcode_converter.py # 舊流程
 │
-├── fonts/                    # 存放來源字型檔
-│   ├── Cubic_11.ttf              # v1.430，版本已固定，見 LICENSES/
+├── fonts/                    # 存放來源字型檔（fallback 鏈依序查找）
+│   ├── Cubic_11.ttf                              # [0] v1.430，版本已固定
+│   ├── fusion-pixel-12px-proportional-zh_hant.ttf # [1] v2026.07.20
 │   └── LICENSES/
 │       ├── Cubic_11-OFL.txt
+│       ├── Fusion_Pixel-OFL.txt
 │       └── ATTRIBUTION.md        # 字型來源、授權與版本固定的理由
 │
 ├── ime_data/                 # 存放來源輸入法碼表、字頻表等
@@ -101,9 +108,10 @@ PicoType_Project/
 │   └── missing_from_cubic.txt    # Cubic 11 畫不出來的 3,119 字
 │
 └── output_data/              # 最終產出
-    ├── picotype_data_optimized.h # 韌體用
-    ├── picotype_12.font          # 模擬器用，1bpp 點陣資料
-    └── picotype_12.map           # 模擬器用，JSON 查找表
+    ├── picotype_data_optimized.h  # 韌體用
+    ├── picotype_12.font           # 模擬器用，1bpp 點陣資料
+    ├── picotype_12.map            # 模擬器用，JSON 查找表
+    └── picotype_12.sources.json   # 各字的來源層，僅供檢閱與驗證 (§7.8)
 ```
 
 > 產出檔名刻意不含 `Cubic` —— 那是 OFL 的保留字型名稱，衍生資料不應沿用。
@@ -231,10 +239,13 @@ python -X utf8 tools/font_viewer.py
 
 | 檢視 | 用途 |
 | :--- | :--- |
-| **字表** | 捲動瀏覽全部字形，側欄顯示選中字的 metric |
+| **字表** | 捲動瀏覽全部字形，側欄顯示選中字的 metric 與來源層 |
 | **單字** | 放大帶格線，列出完整 metric 與原始位元組 |
 | **對照** | 資料字形 vs 即時 TTF 光柵化，差異 pixel 標紅 |
 | **缺字** | 目前畫不出來的字，框內以系統字型疊上該字供辨識 |
+
+字形依**來源層上色**（主字型白色、fallback 層綠色），
+可一眼看出哪些字是補上來的；`f` 鍵可切換成只看某一層。
 
 | 鍵 | 功能 |
 | :--- | :--- |
@@ -242,6 +253,7 @@ python -X utf8 tools/font_viewer.py
 | `Enter` | 單字模式 |
 | `c` | 對照模式 |
 | `m` | 缺字檢視 |
+| `f` | 分層檢視（全部 → 第 0 層 → 第 1 層 → …）|
 | `/` | 跳至碼位（如 `4E2D`）或直接貼字 |
 | `Esc` | 返回 / 離開 |
 
@@ -307,11 +319,14 @@ python -X utf8 tools/font_viewer.py
 
 | 陣列 | bytes | KB |
 | :--- | ---: | ---: |
-| `font_bitmap_data_1bpp` | 219,046 | 213.9 |
-| `font_map_raw_opt` | 143,206 | 139.8 |
+| `font_bitmap_data_1bpp` | 275,790 | 269.3 |
+| `font_map_raw_opt` | 179,480 | 175.3 |
 | `zhuyin_idx_raw_opt` | 10,880 | 10.6 |
 | `zhuyin_pool_opt` | 53,983 | 52.7 |
-| **總計** | **427,115** | **417.1** |
+| **總計** | **520,133** | **508.0** |
+
+改造前的字型部分為 1,454,392 B（1,420.3 KB），現為 455,270 B（444.6 KB），
+**省下 975.7 KB**。
 
 #### B. 輸入法資料 (IME Data)
 
@@ -496,7 +511,7 @@ bitmap 內出現的位元組值: [0, 255]
 *   ASCII（`< 128`）在韌體端是以 TFT 內建字型繪製，不走本資料；
     `.font`/`.map` 內的 ASCII 字形只有模擬器會用到。
 
-### 7.7. 第二階段：多字型 fallback（規劃中）
+### 7.7. 第二階段：多字型 fallback
 
 用多套字型補齊 Cubic 11 畫不出來的 3,119 個字。
 
@@ -520,9 +535,57 @@ EXCLUDE_RANGES = [(0xE000, 0xF8FF)]   # PUA
 EXCLUDE_CHARS  = {0xFE0F, 0x20E3}     # 零寬控制字元
 ```
 
-**實測覆蓋率 2,598 / 3,119（83.3%）**，其中簡體字 1,095 個補到 1,013 個（92.5%）。
-剩餘約 499 字主要是 Ext A/B/C-F 的罕用字，在 12px 純點陣的前提下無解 ——
-那些字（如 `𪚥`，龍×4，64 劃）本來也不可能在 12×12 內畫清楚。
+**建置結果**：
+
+```
+收錄範圍 13,369 字 → 收錄 12,820（排除 PUA/控制字元 34，全鏈皆無字形 515）
+  [0] Cubic 11                        10,229 字
+  [1] Fusion Pixel 12px Prop zh_hant   2,591 字
+
+bitmap 275,790 B (269.3 KB)   map 179,480 B (175.3 KB)   合計 444.6 KB
+```
+
+相對改造前的 1,420.3 KB 省下 **975.7 KB**。驗證三項全過，其中
+**主字型提供的 10,229 字與第一階段逐 pixel 完全相同** ——
+Fusion 只補在空缺處，沒有覆蓋任何既有字形。
+
+**仍然缺字的 515 字**：
+
+| 區塊 | 數量 |
+| :--- | ---: |
+| CJK 基本區（罕用字）| 275 |
+| Ext C-F | 100 |
+| 符號/其他 | 64 |
+| Ext A | 51 |
+| Ext B | 25 |
+
+這些字全部來自 `charsets/missing_from_cubic.txt`，也就是舊字表想要、
+但**沒有任何 12px 點陣字型有提供**的字。Fusion 的 cmap 有 36,518 字
+（Cubic 的 3.5 倍）仍然沒有它們 —— 點陣字型設計者不會為這種冷僻字畫 12px 字形。
+
+實際影響比數字小：以注音碼表交叉比對，515 字中**只有 161 個是打得出來的**，
+其餘 356 個碼表裡根本沒有，永遠不會出現在畫面上。
+
+要補齊其中的 176 個 Ext A/B/C-F 字，唯一方法是加入 16px 字型 ——
+但那違反 §4.5 的判準，會讓行文裡冒出比較大、比較粗的字。維持現狀。
+
+### 7.8. 來源追溯
+
+`build_font.py` 額外輸出 `output_data/picotype_12.sources.json`，記錄每個字由
+哪一層提供，以及全鏈皆無字形的清單。此檔**不進韌體**，僅供檢閱與驗證：
+
+*   `font_viewer.py` 據此為字形上色（主字型白色、fallback 層綠色），
+    並支援 `f` 鍵分層檢視 —— 可直接看「Fusion 補了哪些字」。
+*   `verify_1bpp.py` 據此決定每個字該用哪一層重新光柵化來比對，
+    並確認來源標記與該層 cmap 相符。
+
+產出的韌體標頭檔檔頭也會自動列出鏈的組成與各層字數（OFL 要求的 attribution）：
+
+```c
+// 字型來源（fallback 鏈，依序查找）:
+//   [0] Cubic 11 v1.430 @12px — 10229 字
+//   [1] Fusion Pixel 12px Prop zh_hant v2026.07.20 @12px — 2591 字
+```
 
 Fusion 的 metric 校正值 `dx=+1, dy=-2, advance=13` 已用 3,000 個共有漢字複驗：
 `x_offset` 差 0（3000/3000）、`y_offset` 差 +2（2988/3000）、advance 13→12。
@@ -539,9 +602,9 @@ Fusion 的 metric 校正值 `dx=+1, dy=-2, advance=13` 已用 3,000 個共有漢
 
 | 字型 | 授權 | 狀態 |
 | :--- | :--- | :--- |
-| **Cubic 11 v1.430** | SIL OFL 1.1 | 使用中（主字型，版本已固定）|
-| Fusion Pixel 12px | SIL OFL 1.1 | 第二階段採用 |
-| Ark Pixel 12px | SIL OFL 1.1 | 備案，未採用 |
+| **Cubic 11 v1.430** | SIL OFL 1.1 | **使用中** —— 鏈 [0]，主字型，版本已固定 |
+| **Fusion Pixel 12px zh_hant v2026.07.20** | SIL OFL 1.1 | **使用中** —— 鏈 [1]，fallback |
+| Ark Pixel 12px | SIL OFL 1.1 | 備案，未採用（覆蓋率僅差 4 字）|
 | UnifontEX | GPL2 + 字型嵌入例外 **及** OFL 1.1 | 未採用（字級不符）|
 | Plangothic | SIL OFL 1.1 | 未採用（非點陣字型）|
 | **Zpix（最像素）** | **專有商業授權** | **不得使用** |

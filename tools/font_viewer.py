@@ -30,6 +30,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULT_MAP = "output_data/picotype_12.map"
 DEFAULT_FONT_DATA = "output_data/picotype_12.font"
+DEFAULT_SOURCES = "output_data/picotype_12.sources.json"
 DEFAULT_TTF = "fonts/Cubic_11.ttf"
 DEFAULT_MISSING = "charsets/missing_from_cubic.txt"
 
@@ -43,6 +44,10 @@ DIFF = (255, 78, 96)
 GRID_LINE = (44, 48, 58)
 SEL = (60, 120, 190)
 
+# fallback 鏈各層的顏色。第 0 層（主字型）用純白，後續層用可辨識的色調，
+# 讓「哪些字是補上來的」在字表裡一眼看得出來。
+LAYER_COLORS = [INK, (128, 222, 168), (246, 200, 108), (200, 160, 246)]
+
 CELL = 44          # 字表每格像素
 GLYPH_SCALE = 3    # 字表內字形放大倍率
 DETAIL_SCALE = 18  # 單字模式放大倍率
@@ -52,7 +57,7 @@ DETAIL_SCALE = 18  # 單字模式放大倍率
 # --- 資料存取 ---
 # ==============================================================================
 class FontData:
-    def __init__(self, map_path, font_path):
+    def __init__(self, map_path, font_path, sources_path=None):
         with open(map_path, encoding="utf-8") as f:
             doc = json.load(f)
         self.meta = doc.get("metadata", {})
@@ -60,6 +65,14 @@ class FontData:
         self.is_1bpp = self.meta.get("format") == "1-bit"
         self.blob = open(font_path, "rb").read()
         self.codepoints = sorted(self.chars)
+        # fallback 鏈的來源標記（若有）。純檢閱用，不進韌體。
+        self.layers, self.source_of, self.unavailable = [], {}, []
+        if sources_path and os.path.exists(sources_path):
+            with open(sources_path, encoding="utf-8") as f:
+                s = json.load(f)
+            self.layers = s.get("layers", [])
+            self.source_of = {int(k): v for k, v in s.get("chars", {}).items()}
+            self.unavailable = sorted(int(x, 16) for x in s.get("unavailable", []))
 
     def raw_bytes(self, cp):
         off, w, h = self.chars[cp]
@@ -125,6 +138,7 @@ class Viewer:
         self.pil = pil_font
         self.missing = missing
         self.mode = "grid"          # grid | detail | compare | missing
+        self.layer_filter = None    # None = 全部；否則只看該層提供的字
         self.top_row = 0
         self.sel = 0                # index into current list
         self.search = ""
@@ -149,10 +163,24 @@ class Viewer:
                 continue
         return pygame.font.Font(None, size)
 
+    def layer_color(self, cp):
+        idx = self.data.source_of.get(cp, 0)
+        return LAYER_COLORS[idx % len(LAYER_COLORS)]
+
+    def layer_label(self, cp):
+        idx = self.data.source_of.get(cp)
+        if idx is None or not self.data.layers:
+            return None
+        l = self.data.layers[idx]
+        return f"[{idx}] {l['name']} @{l['size']}px"
+
     # --- 目前檢視的碼位清單 ---
     def cur_list(self):
         if self.mode == "missing":
             return self.missing
+        if self.layer_filter is not None:
+            return [cp for cp in self.data.codepoints
+                    if self.data.source_of.get(cp, 0) == self.layer_filter]
         return self.data.codepoints
 
     def text(self, s, x, y, color=FG, font=None):
@@ -184,15 +212,18 @@ class Viewer:
                              (cx - 2, cy - 2, CELL, CELL), 1)
             if cp in self.data.chars:
                 mat, w, h = self.data.pixels(cp)
-                draw_glyph(self.screen, mat, w, h, cx, cy, GLYPH_SCALE)
+                draw_glyph(self.screen, mat, w, h, cx, cy, GLYPH_SCALE,
+                           self.layer_color(cp))
             else:
                 # 缺字：畫韌體會顯示的洋紅方框，並用系統字型把該字淡淡疊上去，
                 # 讓人看得出缺的到底是哪個字（韌體上當然沒有這一層）。
                 pygame.draw.rect(self.screen, DIFF, (cx + 4, cy + 4,
                                                      CELL - 12, CELL - 12), 1)
-                gl = self.ref.render(chr(cp), True, DIM)
-                self.screen.blit(gl, (cx + (CELL - 4 - gl.get_width()) // 2,
-                                      cy + (CELL - 4 - gl.get_height()) // 2))
+                ch = chr(cp)
+                if ch.isprintable():   # 控制字元交給 SysFont 會直接拋錯
+                    gl = self.ref.render(ch, True, DIM)
+                    self.screen.blit(gl, (cx + (CELL - 4 - gl.get_width()) // 2,
+                                          cy + (CELL - 4 - gl.get_height()) // 2))
         self.draw_sidebar()
 
     def draw_sidebar(self):
@@ -203,13 +234,18 @@ class Viewer:
         x = W - 285
         pygame.draw.line(self.screen, GRID_LINE, (x - 20, 50), (x - 20, H - 40))
         self.text(f"U+{cp:04X}", x, 60, ACCENT, self.big)
-        self.text(chr(cp), x + 130, 56, FG, self.big)
+        if chr(cp).isprintable():
+            self.text(chr(cp), x + 130, 56, FG, self.big)
         y = 95
         if cp in self.data.chars:
             off, w, h = self.data.chars[cp]
             mat, _, _ = self.data.pixels(cp)
-            draw_glyph(self.screen, mat, w, h, x, y, 10)
+            draw_glyph(self.screen, mat, w, h, x, y, 10, self.layer_color(cp))
             y += h * 10 + 16
+            lab = self.layer_label(cp)
+            if lab:
+                self.text(lab, x, y, self.layer_color(cp), self.small)
+                y += 22
             nbytes = len(self.data.raw_bytes(cp))
             for line in (f"w={w}  h={h}",
                          f"offset=0x{off:X}",
@@ -298,14 +334,26 @@ class Viewer:
         self.text(head, 20, 18, DIM, self.small)
         mode_label = {"grid": "字表", "detail": "單字",
                       "compare": "對照", "missing": "缺字"}[self.mode]
+        if self.layer_filter is not None and self.mode == "grid":
+            mode_label += f" · 僅第 {self.layer_filter} 層"
         pos = f"{self.sel+1}/{len(lst)}" if lst else "0/0"
-        self.text(f"[{mode_label}]  {pos}", W - 260, 18, ACCENT, self.small)
+        self.text(f"[{mode_label}]  {pos}", W - 320, 18,
+                  self.layer_color(lst[self.sel]) if lst else ACCENT, self.small)
+        # 鏈的組成與各層字數，色塊與字表內的字形同色
+        if self.data.layers:
+            lx = 20
+            for i, l in enumerate(self.data.layers):
+                c = LAYER_COLORS[i % len(LAYER_COLORS)]
+                self.screen.fill(c, (lx, 40, 8, 8))
+                s = f"{l['name']} {l['count']:,}"
+                self.text(s, lx + 13, 34, c, self.small)
+                lx += 13 + self.small.size(s)[0] + 22
         if self.searching:
             bar = f"跳至: {self.search}_"
             self.text(bar, 20, H - 30, ACCENT, self.small)
         else:
             self.text("方向鍵/PgUp/PgDn 移動   Enter 單字   c 對照   "
-                      "m 缺字   / 跳至碼位或字   Esc 返回",
+                      "m 缺字   f 分層   / 跳至碼位或字   Esc 返回",
                       20, H - 30, DIM, self.small)
 
     # ------------------------------------------------------------------ 輸入
@@ -373,6 +421,13 @@ class Viewer:
         elif k == pygame.K_m:
             self.mode = "missing" if self.mode != "missing" else "grid"
             self.sel, self.top_row = 0, 0
+        elif k == pygame.K_f and self.data.layers:
+            # 循環：全部 → 第 0 層 → 第 1 層 → ... → 全部
+            n = len(self.data.layers)
+            self.layer_filter = 0 if self.layer_filter is None else \
+                (None if self.layer_filter + 1 >= n else self.layer_filter + 1)
+            self.mode = "grid"
+            self.sel, self.top_row = 0, 0
         elif lst:
             step = {pygame.K_LEFT: -1, pygame.K_RIGHT: 1,
                     pygame.K_UP: -self.cols, pygame.K_DOWN: self.cols,
@@ -409,7 +464,7 @@ def main():
         if not os.path.exists(p(rel)):
             raise SystemExit(f"錯誤: 找不到 {p(rel)}\n"
                              f"      請先執行 tools/build_font.py")
-    data = FontData(p(args.map), p(args.font_data))
+    data = FontData(p(args.map), p(args.font_data), p(DEFAULT_SOURCES))
 
     pil = None
     if os.path.exists(p(args.ttf)):
@@ -420,13 +475,17 @@ def main():
         except Exception as ex:
             print(f"警告: 無法載入 TTF，對照模式停用（{ex}）")
 
-    missing = []
-    if os.path.exists(p(args.missing)):
+    # 缺字清單優先取建置結果（實際跑完 fallback 鏈後仍無字形的字），
+    # 沒有的話才退回讀 charsets/ 的目標清單。
+    missing = data.unavailable
+    if not missing and os.path.exists(p(args.missing)):
         txt = open(p(args.missing), encoding="utf-8").read()
         body = "".join(l for l in txt.splitlines() if not l.startswith("#"))
         missing = sorted({ord(c) for c in body if not c.isspace()})
 
     print(f"載入 {len(data.codepoints)} 字，格式 {data.meta.get('format')}")
+    for i, l in enumerate(data.layers):
+        print(f"  [{i}] {l['name']} v{l['version']} @{l['size']}px — {l['count']:,} 字")
     print(f"缺字清單 {len(missing)} 字")
     Viewer(data, pil, missing).run()
 
