@@ -10,8 +10,8 @@ SCREEN_HEIGHT = 240
 FPS = 30
 
 # 資源檔案路徑
-FONT_MAP_PATH = "output_data/Cubic_11.ttf_12.map"
-FONT_DATA_PATH = "output_data/Cubic_11.ttf_12.font"
+FONT_MAP_PATH = "output_data/picotype_12.map"
+FONT_DATA_PATH = "output_data/picotype_12.font"
 IME_IDX_PATH = "output_data/zhuyin.idx"
 IME_DAT_PATH = "output_data/zhuyin.dat"
 
@@ -41,7 +41,11 @@ class FontRenderer:
                 map_data = json.load(f)
                 self.metadata = map_data.get('metadata', {})
                 self.char_map = map_data.get('characters', {})
-                print(f"成功載入 {len(self.char_map)} 個字元的查找表。")
+                # 資料格式：'1-bit' 為目前格式，'1-byte-grayscale' 為舊格式。
+                # 兩者的 .map 結構相同，差別只在 .font 的解碼方式。
+                self.is_1bpp = self.metadata.get('format') == '1-bit'
+                fmt = self.metadata.get('format', '(未標示)')
+                print(f"成功載入 {len(self.char_map)} 個字元的查找表。格式: {fmt}")
                 return True
         except Exception as e:
             print(f"錯誤: 無法載入或解析 .map 檔案: {e}")
@@ -63,14 +67,28 @@ class FontRenderer:
             pygame.draw.rect(not_found_surface, (255, 0, 255, 200), (0, 0, font_size-2, font_size-2), 1)
             return not_found_surface
         offset, width, height = self.char_map[unicode_str]
-        self.font_file.seek(offset)
-        pixel_data = self.font_file.read(width * height)
         char_surface = pygame.Surface((width, height), pygame.SRCALPHA)
-        for y in range(height):
-            for x in range(width):
-                alpha = pixel_data[y * width + x]
-                if alpha > 0:
-                    char_surface.set_at((x, y), (*color, alpha))
+
+        if self.is_1bpp:
+            # 1 bit/pixel, row-aligned, LSB-first：
+            # 每列佔 stride 個位元組，第 x 個 pixel 在 byte x // 8 的 bit x % 8。
+            stride = (width + 7) // 8
+            self.font_file.seek(offset)
+            pixel_data = self.font_file.read(stride * height)
+            for y in range(height):
+                base = y * stride
+                for x in range(width):
+                    if pixel_data[base + (x >> 3)] >> (x & 7) & 1:
+                        char_surface.set_at((x, y), (*color, 255))
+        else:
+            # 舊格式：1 byte/pixel 灰階
+            self.font_file.seek(offset)
+            pixel_data = self.font_file.read(width * height)
+            for y in range(height):
+                for x in range(width):
+                    alpha = pixel_data[y * width + x]
+                    if alpha > 0:
+                        char_surface.set_at((x, y), (*color, alpha))
         return char_surface
 
     def draw_string(self, target_surface, text, x, y, color=(255, 255, 255)):

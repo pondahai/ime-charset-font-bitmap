@@ -10,8 +10,45 @@
 *   **提升效能**：直接讀取預先處理好的二進位資料，遠比動態渲染字元或搜尋文字碼表來得快。
 *   **客製化字庫**：可以根據專案需求，精準地打包需要的字元，大幅縮小最終韌體的體積。
 
+> ### ⚠ 目前的主要流程已更換
+>
+> 字型資料已改為 **1 bit/pixel**，且**不再人工挑選常用字**，改為直接轉換整份字型的
+> cmap。現在的建置指令只有一行：
+>
+> ```bash
+> python -X utf8 tools/build_font.py
+> ```
+>
+> 字型部分的 flash 佔用從 **1,420.3 KB 降到 353.8 KB**，且移除了 3,119 個假字形、
+> 新增 2,433 個真字形。詳細的來龍去脈見 **§7 改造紀錄**，新工具見 §4.3–4.6。
+>
+> 本文件 §1–§6 保留了改造前的原始說明。`charset_extractor.py` 與
+> `full_hardcode_converter.py` 仍在 repo 內，但**已非主要流程** —— 保留它們是為了
+> 記錄「當初為什麼要挑常用字」這段脈絡。
+
 ## 2. 工具鏈運作流程
+
+### 2.1. 目前的流程
+
+```
+fonts/Cubic_11.ttf ──┐
+                     ├─→ tools/build_font.py ──┬─→ output_data/picotype_data_optimized.h  (韌體)
+既有 .h 的 IME 陣列 ──┘                        └─→ output_data/picotype_12.font + .map     (模擬器)
+   (--ime-from)
+```
+
+**只需要一套 TTF。** 收錄哪些字由字型的 cmap 決定，不再需要人工整理字元集
+（`charsets/`）—— 理由見 §7.2。IME 資料原樣沿用，不重建。
+
+驗證與檢視：`verify_1bpp.py`（§4.4）確認產出正確，`font_viewer.py`（§4.6）目視檢閱。
+
+### 2.2. 舊流程（保留說明）
+
 ![charset_ime_font_bitmap](https://github.com/user-attachments/assets/ab65f373-229e-492a-9f29-aa424256df67)
+
+> 上圖描述的是**改造前的流程**，其中的「產生字元集」步驟在目前流程已移除。
+> 圖仍具參考價值：它說明了 §4.1 / §4.2 這兩個工具的運作方式，以及當初為什麼
+> 需要挑選常用字。
 
 整個資料處理流程如下：
 
@@ -40,11 +77,18 @@ PicoType_Project/
 │   └── ...
 │
 ├── tools/                    # 存放本工具鏈的 Python 腳本
-│   ├── charset_extractor.py
-│   └── full_hardcode_converter.py
+│   ├── build_font.py             # 目前的建置工具 (§4.3)
+│   ├── verify_1bpp.py            # 產出驗證 (§4.4)
+│   ├── check_pixel_font.py       # 字型設計字級判定 (§4.5)
+│   ├── font_viewer.py            # 字形檢閱器 (§4.6)
+│   ├── charset_extractor.py      # 舊流程
+│   └── full_hardcode_converter.py # 舊流程
 │
 ├── fonts/                    # 存放來源字型檔
-│   └── Cubic_11.ttf
+│   ├── Cubic_11.ttf              # v1.430，版本已固定，見 LICENSES/
+│   └── LICENSES/
+│       ├── Cubic_11-OFL.txt
+│       └── ATTRIBUTION.md        # 字型來源、授權與版本固定的理由
 │
 ├── ime_data/                 # 存放來源輸入法碼表、字頻表等
 │   ├── BPMFBase.txt
@@ -52,16 +96,23 @@ PicoType_Project/
 │   ├── 字頻表.txt
 │   └── 通用规范汉字表(2013)全部(8105字).txt
 │
-├── charsets/                 # 存放由 charset_extractor.py 產生的字元集
-│   └── chars_from_tcfreq_sc.txt
+├── charsets/                 # 字元集。目前流程已不需要，保留供追溯
+│   ├── chars_from_tcfreq_sc.txt  # 舊流程使用的字元集 (10,915 字)
+│   └── missing_from_cubic.txt    # Cubic 11 畫不出來的 3,119 字
 │
-└── output_data/              # 存放最終產出的 C++ 標頭檔
-    └── picotype_data_optimized.h
+└── output_data/              # 最終產出
+    ├── picotype_data_optimized.h # 韌體用
+    ├── picotype_12.font          # 模擬器用，1bpp 點陣資料
+    └── picotype_12.map           # 模擬器用，JSON 查找表
 ```
+
+> 產出檔名刻意不含 `Cubic` —— 那是 OFL 的保留字型名稱，衍生資料不應沿用。
 
 ## 4. 各工具詳解
 
-### 4.1. `charset_extractor.py` (字元集提取工具)
+> §4.1 與 §4.2 是**舊流程**的工具，目前不使用。新流程見 §4.3 起。
+
+### 4.1. `charset_extractor.py` (字元集提取工具) — 舊流程
 
 *   **功能**:
     此工具的核心功能是從一個或多個不同格式的文字檔中，提取出所有字元，並生成一個不重複、已排序的字元集合檔案。
@@ -79,7 +130,7 @@ PicoType_Project/
     3.  執行 `python tools/charset_extractor.py`。
     4.  腳本會在 `charsets/` 目錄下產生一個合併後的字元集檔案。
 
-### 4.2. `full_hardcode_converter.py` (全功能硬編碼轉換工具)
+### 4.2. `full_hardcode_converter.py` (全功能硬編碼轉換工具) — 舊流程
 
 *   **功能**:
     此為核心轉換工具，負責將文字資源轉換成最終的 C++ 硬編碼資料。
@@ -101,6 +152,102 @@ PicoType_Project/
     3.  執行 `python tools/full_hardcode_converter.py`。
     4.  腳本會在 `output_data/` 目錄下產生 `picotype_data_optimized.h`。
 
+### 4.3. `build_font.py` (字型建置工具) — **目前使用**
+
+*   **功能**:
+    取代 §4.2 的字型部分。單一資料模型、雙輸出，一次建置同時產生韌體用的 `.h`
+    與模擬器用的 `.font`/`.map`，兩者從此不可能不同步。
+
+*   **相對舊版的四項改動**:
+
+    1.  **不再挑常用字**：直接取整份 TTF 的 cmap。詳見 §7.2。
+    2.  **1 bit/pixel、row-aligned**：原始資料雖是 1 B/px，但只有 `0x00`/`0xFF`
+        兩種值，轉換無損。
+    3.  **雙輸出**：`.h` 與 `.font`/`.map` 同源。
+    4.  **PUA 與零寬控制字元排除**：`EXCLUDE_RANGES` / `EXCLUDE_CHARS`。
+
+*   **如何使用**:
+
+    ```bash
+    python -X utf8 tools/build_font.py
+    python -X utf8 tools/build_font.py --font fonts/Cubic_11.ttf --size 12
+    ```
+
+    Windows 上 `-X utf8` 是必要的，否則中文輸出會亂碼。
+
+*   **IME 資料不由本工具產生**:
+    既有的注音產出已穩定（多份標頭檔與 `output_data/` 之間位元組完全相同），
+    故本工具以 `--ime-from` 從既有標頭檔**原樣沿用** `zhuyin_*` 陣列，不重建。
+
+*   **每個字形在建置時都會跑 round-trip `assert`**，1bpp 無損是逐字驗證的，不是抽樣。
+
+### 4.4. `verify_1bpp.py` (產出驗證)
+
+三項檢查，任一失敗即以非零碼結束：
+
+1.  **round-trip** —— 把 `.h` 內的 1bpp 資料解碼回 1 B/px，與字型重新光柵化的結果
+    逐 byte 比對。證明打包與解碼互為逆運算，且雙方對 stride、位元順序的認知一致。
+2.  **與舊資料一致** —— 對新舊都收錄的字比對字形與 metric，證明改造沒有動到任何
+    既有字形。
+3.  **無 notdef 殘留** —— 以 cmap 為準，不靠 bitmap 特徵猜測（理由見 §7.2）。
+
+```bash
+python -X utf8 tools/verify_1bpp.py
+```
+
+### 4.5. `check_pixel_font.py` (字型設計字級判定)
+
+**判準**：真正的點陣字型在其設計字級光柵化後，筆畫對齊 pixel grid，
+**只會出現 0 與 255 兩種灰階值**。出現中間值即代表反鋸齒介入，
+亦即該字型並非為此字級設計。
+
+這個判準對本專案是決定性的：資料格式是 1 bit/pixel，若光柵化結果帶灰階，
+轉換就必須做二值化門檻 —— 那是有損的，細筆畫會斷裂或消失。
+
+```bash
+python -X utf8 tools/check_pixel_font.py fonts/Cubic_11.ttf 11 12 13
+```
+
+實測結果（節錄）：
+
+| 字型 | 乾淨的字級 | 其他字級 |
+| :--- | :--- | :--- |
+| Cubic 11 | **只有 @12** | @11 有 90.5% 的墨水像素是灰階 |
+| Fusion Pixel 12px | **只有 @12** | @11 92.9%、@13 72.0% |
+| BoutiqueBitmap9x9 | @10 | @9 88.9%、@12 59.1% |
+| Unifont 16.0.04 | 只有 @16 | **@12 高達 99.9%** |
+| Noto Sans TC | **沒有** | 各字級皆 100%（純 outline 字型，對照組）|
+
+兩個推論：`FONT_SIZE = 12` 不是隨意選的，是 Cubic 11 唯一正確的字級；
+而**點陣字型絕不可離開設計字級去縮放**。
+
+### 4.6. `font_viewer.py` (字形檢閱器)
+
+直接檢視轉換後的字形。它讀 `.font`/`.map`，也就是**韌體實際會燒進去的同一份資料**。
+
+```bash
+python -X utf8 tools/font_viewer.py
+```
+
+| 檢視 | 用途 |
+| :--- | :--- |
+| **字表** | 捲動瀏覽全部字形，側欄顯示選中字的 metric |
+| **單字** | 放大帶格線，列出完整 metric 與原始位元組 |
+| **對照** | 資料字形 vs 即時 TTF 光柵化，差異 pixel 標紅 |
+| **缺字** | 目前畫不出來的字，框內以系統字型疊上該字供辨識 |
+
+| 鍵 | 功能 |
+| :--- | :--- |
+| 方向鍵 / PgUp / PgDn / Home / End | 移動 |
+| `Enter` | 單字模式 |
+| `c` | 對照模式 |
+| `m` | 缺字檢視 |
+| `/` | 跳至碼位（如 `4E2D`）或直接貼字 |
+| `Esc` | 返回 / 離開 |
+
+**對照模式是 §4.4 驗證器的視覺化版本** —— 驗證器只告訴你過或不過，
+檢閱器讓你看出是**哪一個 pixel** 不一樣。
+
 ## 5. 產出檔案格式詳解
 
 ### 5.1. 字元集檔案 (`chars_from_tcfreq_sc.txt`)
@@ -118,9 +265,13 @@ PicoType_Project/
 字型資料被分為兩部分：一個「對應表 (Map)」和一個「點陣圖資料池 (Bitmap Pool)」。
 
 *   `font_map_raw_opt`: 字元對應表 (Index)。它是一個 `FontMapRecord_Opt` 結構的陣列。
-*   `font_bitmap_data_opt`: 包含了所有字元實際的、連續存放的點陣圖資料 (Pool)。
+*   `font_bitmap_data_1bpp`: 包含了所有字元實際的、連續存放的點陣圖資料 (Pool)。
 
-**`struct FontMapRecord_Opt` 結構 (共 16 Bytes):**
+> **符號已更名**：原本叫 `font_bitmap_data_opt`。改名是**刻意的防呆** —— 搭配
+> `#define PICOTYPE_FONT_BPP 1`，舊的 1 B/px renderer 遇到新資料會**編譯失敗**，
+> 而不是畫出一片雪花。錯誤的組合應該編不過。
+
+**`struct FontMapRecord_Opt` 結構 (共 14 Bytes):**
 
 | 欄位        | 型別     | 大小 (Bytes) | 說明                                                              |
 | :---------- | :------- | :----------- | :---------------------------------------------------------------- |
@@ -131,10 +282,36 @@ PicoType_Project/
 | `x_advance` | `uint8_t`  | 1            | 字元在水平方向上的總繪製寬度，用於計算下一個字元的起始位置。       |
 | `x_offset`  | `int8_t`   | 1            | 字元點陣圖相對於繪製原點的水平偏移。                               |
 | `y_offset`  | `int8_t`   | 1            | 字元點陣圖相對於繪製原點的垂直偏移（基線之上）。                   |
-| `padding`   | `uint8_t`  | 1            | 填充位元組，使結構體大小對齊到 16 bytes，提高存取效率。           |
+| `padding`   | `uint8_t`  | 1            | 填充位元組。                                                       |
+
+> 原始碼中此欄位的註解曾寫「to make it 16 bytes」，**該註解是錯的** ——
+> 結構加總為 14 bytes，且 `__attribute__((packed))` 本來就不會補到 16。
+> `unicode` 欄位也不能縮成 `uint16_t`：資料中有 247 個字的碼位大於 `0xFFFF`。
+
+**點陣圖格式：1 bit/pixel、row-aligned、LSB-first**
+
+*   `bit 0` = 該位元組**最左邊**的 pixel
+*   每列佔 `stride = (width + 7) / 8` 個位元組
+*   第 `j` 列的起點是 `offset + j * stride`
+
+選 row-aligned 而非 tight bitstream，是因為後者只再省約 33 KB，卻讓解碼需要跨
+位元組位移；row-aligned 的解碼就是 `base + row * stride`。
+
+標頭檔另外宣告 `#define PICOTYPE_MAX_GLYPH_BYTES`（目前為 26），韌體的
+`MAX_CHAR_BUFFER_SIZE` 直接綁定它，緩衝區大小便不可能與資料脫節。
 
 **運作方式**:
-要繪製一個字元時，先透過二分搜尋法在 `font_map_opt` 中找到對應的 Unicode 紀錄，從中取得 `offset`, `width`, `height` 等資訊，然後再去 `font_bitmap_data_opt` 中讀取點陣圖資料來繪製。
+要繪製一個字元時，先透過二分搜尋法在 `font_map_opt` 中找到對應的 Unicode 紀錄，從中取得 `offset`, `width`, `height` 等資訊，然後再去 `font_bitmap_data_1bpp` 中讀取點陣圖資料，逐位元測試後繪製。
+
+**目前的資料量**:
+
+| 陣列 | bytes | KB |
+| :--- | ---: | ---: |
+| `font_bitmap_data_1bpp` | 219,046 | 213.9 |
+| `font_map_raw_opt` | 143,206 | 139.8 |
+| `zhuyin_idx_raw_opt` | 10,880 | 10.6 |
+| `zhuyin_pool_opt` | 53,983 | 52.7 |
+| **總計** | **427,115** | **417.1** |
 
 #### B. 輸入法資料 (IME Data)
 
@@ -173,9 +350,9 @@ PicoType_Project/
 
 ### 6.1. 如何執行模擬器
 
-1.  **產生資料**: 確保已執行 `tools/full_hardcode_converter.py`，並在 `output_data/` 目錄下產生了模擬器所需的四個檔案。這四個檔案協同運作，構成了模擬器的資料基礎：
-    *   `... .map` (**字型對應表**): 一個 JSON 格式的查找表，記錄了每個字元的 Unicode 碼、尺寸，以及它在 `.font` 檔案中的數據位置。
-    *   `... .font` (**字型點陣圖資料**): 一個二進位檔案，包含了所有字元被渲染後的原始、連續存放的像素資料。
+1.  **產生資料**: 確保已執行 `tools/build_font.py`，並在 `output_data/` 目錄下產生了模擬器所需的四個檔案。這四個檔案協同運作，構成了模擬器的資料基礎：
+    *   `picotype_12.map` (**字型對應表**): 一個 JSON 格式的查找表，記錄了每個字元的 Unicode 碼、尺寸，以及它在 `.font` 檔案中的數據位置。其 `metadata.format` 目前為 `"1-bit"`（舊資料為 `"1-byte-grayscale"`），`main.py` 依此欄位決定解碼方式，新舊檔案可共存。
+    *   `picotype_12.font` (**字型點陣圖資料**): 一個二進位檔案，包含了所有字元被渲染後的、連續存放的 1bpp 像素資料。格式定義見 §5.2。
     *   `zhuyin.idx` (**輸入法索引**): 一個 JSON 檔案，將注音輸入碼（如 "ㄍㄨㄤ1"）對應到其候選字在 `.dat` 檔案中的位置和長度。
     *   `zhuyin.dat` (**輸入法候選字資料**): 一個二進位檔案，連續存放了所有輸入碼對應的候選字字串，形成一個巨大的「資料池」。
 
@@ -200,3 +377,179 @@ PicoType_Project/
     *   按 `→` (右方向鍵) 或 `=` 鍵翻到下一頁。
     *   按 `←` (左方向鍵) 或 `-` 鍵翻到上一頁。
 *   **退出**: 按 `Escape` 鍵或關閉視窗。
+
+---
+
+## 7. 改造紀錄：1bpp 與整份 cmap
+
+這個 repo 曾經處於「clone 下來跑不起來」的狀態。以下是把它修好的過程。
+所有數字皆為實測，每一項都註明了測法。
+
+### 7.1. 起點：三個問題
+
+1.  **repo 跑不起來** —— `full_hardcode_converter.py` 讀 `../fonts/`、`../charsets/`、
+    `../ime_data/`，三個目錄都沒有被 commit 進去，也沒有 `.gitignore`，就是單純漏掉。
+2.  **資料格式浪費** —— 字型資料是 1 byte/pixel，但整份只有 `0x00` 和 `0xFF` 兩種值。
+3.  **多條建置線各自為政** —— 同一份資料存在多種版本，字數從 10,915 到 13,841
+    不等，彼此不同步。
+
+### 7.2. 為什麼不再挑常用字
+
+原本的流程是「人工整理常用字表 → 只轉那些字」。這帶來一個一直沒被發現的問題：
+字表裡有 **3,119 個字是 Cubic 11 根本沒有的**。
+
+字型缺字時 PIL 不會報錯，而是回傳 `.notdef`（字型的「查無此字」預設圖）。
+Cubic 11 的 `.notdef` 是一個 13×5 的 2×2 點圖，而舊程式唯一的過濾條件是：
+
+```python
+if glyph_width == 0 or glyph_height == 0:
+```
+
+`.notdef` 的寬高都不為 0，**通過檢查，被當成正常字存了起來**。等於同一張點圖被存了
+3,119 次，加上各自 14 B 的索引，約 80 KB 用來表達「這個字沒有」——
+而且沒有任何地方顯示出異常。
+
+**那 3,119 個字並不是雜訊**，它們是有意義的字：
+
+| 類別 | 數量 |
+| :--- | ---: |
+| 簡體字（OpenCC 判定） | 1,095 |
+| 字頻表內的罕用繁體字 | 244 |
+| 其餘 CJK 基本區 | 1,244 |
+| 符號（羅馬數字、圈號、箭頭、℉ 等） | 122 |
+| Ext A / B / C-F | 270 |
+| PUA 私用區（全部來自字頻表） | 29 |
+
+沒用的是那 3,119 份**重複的 bitmap**，不是這份字表本身。字表已保留為
+`charsets/missing_from_cubic.txt`，它就是第二階段 fallback 鏈的目標清單。
+
+改用整份 cmap 之後：
+
+| 方案 | 字數 | 其中真字形 | 合計大小 |
+| :--- | ---: | ---: | ---: |
+| 改造前，1 B/px | 10,915 | 7,795 | 1,420.3 KB |
+| 1bpp，沿用舊字表 | 10,914 | 7,795 | 344.8 KB |
+| **1bpp，整份 cmap** | **10,229** | **10,229** | **353.8 KB** |
+
+多 9 KB，換掉 3,119 個假字、換來 2,433 個真字，notdef 歸零。
+**附帶效果**：挑字這個步驟消失了，建置的輸入從「一套 TTF + 一份人工字表」
+簡化成只要一套 TTF。
+
+> **偵測 notdef 必須用 cmap 查表，不可靠 bitmap 特徵猜測。**
+> 若改用特徵比對，`'` 和 `;` 剛好也是 4 個亮點會被誤刪；`。`、`︷`、`＝`、`～`
+> 這 4 個真字也是 13×5，同樣會被誤傷。
+
+### 7.3. 字型版本的固定
+
+`Cubic_11.ttf` 原本不在 repo 裡，而官方現行版本是 v1.500 —— 若版本不對，重建會
+**無聲改掉**數千個字的字形。
+
+找到的 v1.430 以與舊流程完全相同的光柵化參數重跑，與既有標頭檔逐 pixel 比對：
+
+```
+逐 pixel 比對: 10914/10914 相同 (100.0000%)
+bitmap 內出現的位元組值: [0, 255]
+```
+
+**100% 相同**，確認為原始那一份，同時也複驗了「只有兩種位元組值 → 轉 1bpp 無損」
+這個前提。此版本已固定收錄於 `fonts/`，**不要用 v1.500 覆蓋**。
+
+### 7.4. 驗證結果
+
+`tools/verify_1bpp.py` 三項全數通過：
+
+```
+[1/3] round-trip                10229/10229 通過
+[2/3] 與舊資料比對               共有 7796 字，7796 字完全相同
+                                移除 3119 字（Cubic 沒有的 notdef）
+                                新增 2433 字（cmap 內、舊字表未收錄）
+[3/3] notdef 殘留檢查            0 個
+```
+
+**7,796 個共有字逐 pixel 完全相同 —— 改造沒有動到任何既有字形。**
+
+### 7.5. 下游配合修改
+
+`class FontRenderer` 在兩個 pico repo 內逐字元完全相同，一份 patch 兩邊都能套：
+
+| repo | 檔案 |
+| :--- | :--- |
+| `pico_keyboard_ime_terminal_usb_host` | `pico_keyboard_ime_terminal_usb_host.ino` |
+| `pico_keyboard_ime_terminal` | `software/pico_keyboard_ime_terminal.ino` |
+
+四處改動：
+
+1.  `drawChar()` 改為位元解碼，`font_bitmap_data_opt` → `font_bitmap_data_1bpp`
+2.  `MAX_CHAR_BUFFER_SIZE` 改為綁定標頭檔的 `PICOTYPE_MAX_GLYPH_BYTES`
+    （原為固定值 256）
+3.  **缺字前進量 `FONT_HEIGHT / 2` = 8 → `FULLWIDTH_ADVANCE` = 13**。
+    全形字的 `x_advance` 是 13，原本 `drawString()` 與 `getStringWidth()`
+    會算出不同的寬度導致排版錯位。這個 bug 原先被 notdef 遮住（每個字都「有字形」，
+    永遠走不到缺字路徑），改用 cmap 後才會浮現，故一併修正。
+4.  `main.py` 的 `get_char_surface()` 改為位元解碼，依 `metadata.format` 判斷。
+
+### 7.6. 已知限制
+
+*   **IME 資料不由本工具產生**，見 §4.3。
+*   **Cubic 11 沒有的字會顯示洋紅方框。** 這些字原本顯示為 `.notdef` 點圖，
+    同樣看不懂，但方框至少誠實表達「缺字形」。真正的解法是多字型 fallback 鏈。
+*   ASCII（`< 128`）在韌體端是以 TFT 內建字型繪製，不走本資料；
+    `.font`/`.map` 內的 ASCII 字形只有模擬器會用到。
+
+### 7.7. 第二階段：多字型 fallback（規劃中）
+
+用多套字型補齊 Cubic 11 畫不出來的 3,119 個字。
+
+**候選字型必須通過 §4.5 的設計字級判準** —— 這是比授權更嚴格的門檻。
+實測後，原先規劃的四層鏈縮減為兩層：
+
+| 字型 | 設計字級 | 結果 |
+| :--- | :--- | :--- |
+| Cubic 11 | 12 | 主字型 |
+| **Fusion Pixel 12px** | **12** | **採用**（@12 乾淨，@11/@13 皆不合格）|
+| Ark Pixel 12px | 12 | 不採用 —— 覆蓋率僅差 4 個字，是 Fusion 的子集 |
+| UnifontEX | 16 | **剔除** —— @12 有 99.9% 灰階 |
+| Plangothic | outline | **剔除** —— 非點陣字型 |
+
+```python
+FONT_CHAIN = [
+    ("fonts/Cubic_11.ttf",                               12, {}),
+    ("fonts/fusion-pixel-12px-proportional-zh_hant.ttf", 12, dict(dx=+1, dy=-2, advance=13)),
+]
+EXCLUDE_RANGES = [(0xE000, 0xF8FF)]   # PUA
+EXCLUDE_CHARS  = {0xFE0F, 0x20E3}     # 零寬控制字元
+```
+
+**實測覆蓋率 2,598 / 3,119（83.3%）**，其中簡體字 1,095 個補到 1,013 個（92.5%）。
+剩餘約 499 字主要是 Ext A/B/C-F 的罕用字，在 12px 純點陣的前提下無解 ——
+那些字（如 `𪚥`，龍×4，64 劃）本來也不可能在 12×12 內畫清楚。
+
+Fusion 的 metric 校正值 `dx=+1, dy=-2, advance=13` 已用 3,000 個共有漢字複驗：
+`x_offset` 差 0（3000/3000）、`y_offset` 差 +2（2988/3000）、advance 13→12。
+
+> **一項更正**：先前的分析文件曾記載 Fusion 與 Cubic「字身完全一致，只差位置」。
+> 逐 pixel 比對後確認**該說法不成立**（3,000 字中 0 字完全相同）。
+> metric 校正值本身是對的，但字形不同 —— Fusion 雖將 Cubic 11 列為上游來源之一，
+> 其 zh_hant 漢字字形是自己的。實務影響：fallback 的字會是相同字級、相同筆畫粗細、
+> 相同 pixel grid，但風格不完全一致。
+
+## 8. 字型授權
+
+完整說明見 `fonts/LICENSES/ATTRIBUTION.md`。摘要：
+
+| 字型 | 授權 | 狀態 |
+| :--- | :--- | :--- |
+| **Cubic 11 v1.430** | SIL OFL 1.1 | 使用中（主字型，版本已固定）|
+| Fusion Pixel 12px | SIL OFL 1.1 | 第二階段採用 |
+| Ark Pixel 12px | SIL OFL 1.1 | 備案，未採用 |
+| UnifontEX | GPL2 + 字型嵌入例外 **及** OFL 1.1 | 未採用（字級不符）|
+| Plangothic | SIL OFL 1.1 | 未採用（非點陣字型）|
+| **Zpix（最像素）** | **專有商業授權** | **不得使用** |
+
+**Zpix 明確排除**：其條款禁止「修改、反編譯、轉換、拆分等反向操作」，
+而本專案的建置流程（TTF → 點陣圖 → 打包進韌體）正屬於此類操作。
+
+**保留字型名稱（Reserved Font Name）**：Cubic 保留「Cubic」「俐方體」。
+本專案的產出不得以這些名稱對外呈現為字型名，故輸出檔名採中性命名
+（`picotype_12.*`）。散布時須隨附 OFL 授權文字，產出的標頭檔檔頭會自動帶上
+對應的 attribution 註解。
