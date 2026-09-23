@@ -785,3 +785,61 @@ SOURCE_FILES_CONFIG = [
 本專案的產出不得以這些名稱對外呈現為字型名，故輸出檔名採中性命名
 （`picotype_12.*`）。散布時須隨附 OFL 授權文字，產出的標頭檔檔頭會自動帶上
 對應的 attribution 註解。
+
+## 10. 輸入法碼表與字表授權
+
+完整說明見 `ime_data/LICENSES/ATTRIBUTION.md`。
+本工具鏈自身的程式碼採 MIT，見 `LICENSE`。
+
+### 10.1. 注音碼表 —— McBopomofo
+
+| | |
+| :--- | :--- |
+| 上游 | https://github.com/openvanilla/McBopomofo （小麥注音輸入法）|
+| 授權 | **MIT License**（全文見 `ime_data/LICENSES/McBopomofo-MIT.txt`）|
+| 著作權 | Copyright (c) 2011-2026 Mengjuei Hsieh et al. |
+
+| 檔案 | 內容 | 上游是否另有出處 |
+| :--- | :--- | :--- |
+| `BPMFBase.txt` | 單字注音對應 | **無** —— 適用 McBopomofo 的 MIT |
+| `BPMFPunctuations.txt` | 標點符號對應 | **無** —— 適用 McBopomofo 的 MIT |
+
+**未使用 `BPMFMappings.txt`，而這點必須寫明。** 依 McBopomofo 的
+`Source/Data/README.md`，該多字詞庫檔為
+*"Originally simplified from tsi.src of libtabe (BSD Licensed) with modifications"*
+—— 它是該資料目錄內**唯一**帶有 libtabe BSD 血統的檔案。
+
+本專案的輸入法是**單字候選**（注音 → 候選字）而非詞庫（注音 → 候選詞），
+從未取用該檔，因此不涉及 libtabe，碼表側的義務僅為 **MIT 的姓名標示**。
+
+> ⚠️ 若將來要加入「詞」的候選功能，這個結論就會改變 ——
+> 屆時必須重新檢視 `BPMFMappings.txt` 的 BSD 條款。
+
+碼表在產出中以 `zhuyin_idx_raw_opt[]` 與 `zhuyin_pool_opt[]` 兩個陣列存在。
+依 §4.3，`build_font.py` **不重建** IME 資料而是原樣沿用，
+所以即使建置流程改版，這份出處聲明依然適用。
+
+### 10.2. 字表來源
+
+這些是**字元清單**而非程式碼，構成收錄範圍三方聯集中的「字表」那一支（見 §8）。
+
+| 檔案 | 性質 | 出處 |
+| :--- | :--- | :--- |
+| `通用规范汉字表(2013)全部(8105字).txt` | 中國大陸 2013 年公布的國家規範字表 | 政府公布的規範性文件，內容為事實性字表 |
+| `字頻表.txt` | 依字頻排序的繁體字清單 | **出處未確認** |
+
+`字頻表.txt` 無檔頭、無出處註記。從內容判斷（收錄「臺」「灣」且為繁體）
+應為臺灣來源的字頻統計，但無法從檔案本身確認。它在管線中只用於決定
+哪些 Unicode 碼位要收錄，**最終產出不含這份檔案本身**，故散布風險低 ——
+但出處仍應補上。知道原始出處的話請開 issue 或直接更新。
+
+### 10.3. 下游應該怎麼標示
+
+任何收錄 `picotype_data_optimized.h`（或其衍生的 `.font` / `.map` /
+`ime_tables.h`）的專案，都必須隨附：
+
+1. McBopomofo 的 MIT 著作權聲明與授權條文
+2. 字型的 SIL OFL 1.1 聲明（見 §9）
+
+字型部分的 attribution 會自動寫進標頭檔檔頭；碼表部分請在該專案的
+`THIRD_PARTY_NOTICES.md` 中標示。
